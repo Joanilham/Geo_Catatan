@@ -1,4 +1,11 @@
+import 'dart:convert'; // Untuk JSON
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart' as latlong;
+import 'package:geolocator/geolocator.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'catatan_model.dart';
 
 void main() {
   runApp(const MyApp());
@@ -7,116 +14,220 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      debugShowCheckedModeBanner: false,
+      home: const MapScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class MapScreen extends StatefulWidget {
+  const MapScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _MapScreenState extends State<MapScreen> {
+  List<CatatanModel> _savedNotes = [];
+  final MapController _mapController = MapController();
+  latlong.LatLng? _myLocation;
 
-  void _incrementCounter() {
+  @override
+  void initState() {
+    super.initState();
+    _loadNotes(); // Load data saat aplikasi mulai (Tugas 3)
+  }
+
+  // --- FITUR SIMPAN & LOAD (Tugas 3) ---
+  Future<void> _saveNotes() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String encodedData = jsonEncode(
+      _savedNotes.map((note) => note.toJson()).toList(),
+    );
+    await prefs.setString('saved_notes', encodedData);
+  }
+
+  Future<void> _loadNotes() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? notesString = prefs.getString('saved_notes');
+    if (notesString != null) {
+      final List<dynamic> decodedData = jsonDecode(notesString);
+      setState(() {
+        _savedNotes = decodedData
+            .map((item) => CatatanModel.fromJson(item))
+            .toList();
+      });
+    }
+  }
+
+  // --- FITUR LOKASI ---
+  Future<void> _findMyLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return;
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return;
+    }
+
+    Position position = await Geolocator.getCurrentPosition();
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _myLocation = latlong.LatLng(position.latitude, position.longitude);
     });
+
+    _mapController.move(_myLocation!, 15.0);
+  }
+
+  // --- FITUR TAMBAH DENGAN PILIHAN JENIS (Tugas 1) ---
+  void _handleLongPress(TapPosition _, latlong.LatLng point) async {
+    try {
+      List<Placemark> placemarks = await placemarkFromCoordinates(
+        point.latitude,
+        point.longitude,
+      );
+      String address = placemarks.first.street ?? "Alamat tidak dikenal";
+
+      // Tampilkan Dialog Pilihan Jenis
+      _showTypeSelectionDialog(point, address);
+
+    } catch (e) {
+      debugPrint("Error: $e");
+    }
+  }
+
+  void _showTypeSelectionDialog(latlong.LatLng point, String address) {
+    showDialog(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text("Pilih Jenis Lokasi"),
+        children: [
+          _buildDialogOption(ctx, point, address, "Rumah", Icons.home, Colors.green),
+          _buildDialogOption(ctx, point, address, "Toko", Icons.store, Colors.blue),
+          _buildDialogOption(ctx, point, address, "Kantor", Icons.work, Colors.orange),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDialogOption(BuildContext ctx, latlong.LatLng point, String address, String type, IconData icon, Color color) {
+    return SimpleDialogOption(
+      onPressed: () {
+        setState(() {
+          _savedNotes.add(CatatanModel(
+            position: point,
+            note: "Catatan Baru",
+            address: address,
+            jenis: type, // Simpan jenis yang dipilih
+          ));
+        });
+        _saveNotes(); // Simpan ke memori
+        Navigator.pop(ctx);
+      },
+      child: Row(
+        children: [
+          Icon(icon, color: color),
+          const SizedBox(width: 10),
+          Text(type),
+        ],
+      ),
+    );
+  }
+
+  // --- FITUR HAPUS (Tugas 2) ---
+  void _showDeleteDialog(CatatanModel note) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text("Hapus ${note.jenis}?"),
+        content: Text(note.address),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Batal")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () {
+              setState(() {
+                _savedNotes.remove(note);
+              });
+              _saveNotes(); // Update penyimpanan
+              Navigator.pop(ctx);
+            },
+            child: const Text("Hapus", style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Helper untuk memilih ikon berdasarkan jenis (Tugas 1)
+  IconData _getIconForType(String type) {
+    switch (type) {
+      case 'Toko': return Icons.store;
+      case 'Kantor': return Icons.work;
+      case 'Rumah': default: return Icons.home;
+    }
+  }
+
+  Color _getColorForType(String type) {
+    switch (type) {
+      case 'Toko': return Colors.blue;
+      case 'Kantor': return Colors.orange;
+      case 'Rumah': default: return Colors.green;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
+      appBar: AppBar(title: const Text("Geo-Catatan Lengkap")),
+      body: FlutterMap(
+        mapController: _mapController,
+        options: MapOptions(
+          initialCenter: const latlong.LatLng(-6.2, 106.8),
+          initialZoom: 13.0,
+          onLongPress: _handleLongPress,
         ),
+        children: [
+          TileLayer(
+            urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+            userAgentPackageName: 'com.example.geocatatan',
+          ),
+          MarkerLayer(
+            markers: [
+              // Marker Catatan (Tugas 1: Ikon beda-beda)
+              ..._savedNotes.map((n) => Marker(
+                point: n.position,
+                width: 50,
+                height: 50,
+                child: GestureDetector(
+                  onTap: () => _showDeleteDialog(n), // Tugas 2: Klik untuk hapus
+                  child: Icon(
+                    _getIconForType(n.jenis),
+                    color: _getColorForType(n.jenis),
+                    size: 40,
+                  ),
+                ),
+              )),
+
+              // Marker Lokasi Saya
+              if (_myLocation != null)
+                Marker(
+                  point: _myLocation!,
+                  width: 40,
+                  height: 40,
+                  child: const Icon(Icons.gps_fixed, color: Colors.red, size: 35),
+                ),
+            ],
+          ),
+        ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+        onPressed: _findMyLocation,
+        child: const Icon(Icons.my_location),
+      ),
     );
   }
 }
